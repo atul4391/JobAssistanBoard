@@ -26,3 +26,5 @@ dist-ssr
 # Server specific
 server/node_modules
 server/db.json
+
+.vercel
