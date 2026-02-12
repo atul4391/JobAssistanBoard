@@ -196,5 +196,5 @@ app.get('/api/stats', async (req, res) => {
   }
 });
 
-// Vercel serverless handler
+// Export for Vercel serverless
 export default app;
