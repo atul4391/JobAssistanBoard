@@ -1,11 +1,6 @@
 import express from 'express';
 import cors from 'cors';
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+import { kv } from '@vercel/kv';
 
 const app = express();
 
@@ -13,141 +8,192 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// JSON DB setup - use /tmp for serverless environment
-const dbPath = path.join('/tmp', 'db.json');
+// KV Keys
+const JOBS_KEY = 'jobs';
+const NEXT_ID_KEY = 'nextId';
 
-// Initialize DB if not exists
-if (!fs.existsSync(dbPath)) {
-  fs.writeFileSync(dbPath, JSON.stringify({ jobs: [], nextId: 1 }, null, 2));
-}
-
-// Helper to read/write DB
-const readDb = () => {
-  try {
-    const data = fs.readFileSync(dbPath, 'utf8');
-    return JSON.parse(data);
-  } catch (error) {
-    return { jobs: [], nextId: 1 };
+// Helper to initialize DB if empty
+const initDb = async () => {
+  const jobs = await kv.get(JOBS_KEY);
+  const nextId = await kv.get(NEXT_ID_KEY);
+  
+  if (!jobs) {
+    await kv.set(JOBS_KEY, []);
+  }
+  if (!nextId) {
+    await kv.set(NEXT_ID_KEY, 1);
   }
 };
 
-const writeDb = (data) => {
-  try {
-    fs.writeFileSync(dbPath, JSON.stringify(data, null, 2));
-  } catch (error) {
-    console.error('Failed to write DB:', error);
-  }
+// Helper to read jobs
+const getJobs = async () => {
+  await initDb();
+  return await kv.get(JOBS_KEY) || [];
+};
+
+// Helper to get nextId
+const getNextId = async () => {
+  return await kv.get(NEXT_ID_KEY) || 1;
 };
 
 // GET all jobs
-app.get('/api/jobs', (req, res) => {
-  const db = readDb();
-  const jobs = db.jobs.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
-  res.json(jobs);
+app.get('/api/jobs', async (req, res) => {
+  try {
+    const jobs = await getJobs();
+    const sortedJobs = jobs.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+    res.json(sortedJobs);
+  } catch (error) {
+    console.error('Error fetching jobs:', error);
+    res.status(500).json({ error: 'Failed to fetch jobs' });
+  }
 });
 
 // GET single job
-app.get('/api/jobs/:id', (req, res) => {
-  const db = readDb();
-  const job = db.jobs.find(j => j.id === parseInt(req.params.id));
-  if (!job) return res.status(404).json({ error: 'Job not found' });
-  res.json(job);
+app.get('/api/jobs/:id', async (req, res) => {
+  try {
+    const jobs = await getJobs();
+    const job = jobs.find(j => j.id === parseInt(req.params.id));
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    res.json(job);
+  } catch (error) {
+    console.error('Error fetching job:', error);
+    res.status(500).json({ error: 'Failed to fetch job' });
+  }
 });
 
 // POST new job
-app.post('/api/jobs', (req, res) => {
-  const { company, position, source, resumeUsed, notes, status, url, salary, location, contactPerson } = req.body;
-  if (!company || !position) {
-    return res.status(400).json({ error: 'Company and position are required' });
+app.post('/api/jobs', async (req, res) => {
+  try {
+    const { company, position, source, resumeUsed, notes, status, url, salary, location, contactPerson } = req.body;
+    
+    if (!company || !position) {
+      return res.status(400).json({ error: 'Company and position are required' });
+    }
+
+    const jobs = await getJobs();
+    const nextId = await getNextId();
+    
+    const newJob = {
+      id: nextId,
+      company,
+      position,
+      source: source || '',
+      resumeUsed: resumeUsed || '',
+      notes: notes || '',
+      status: status || 'applied',
+      url: url || '',
+      salary: salary || '',
+      location: location || '',
+      contactPerson: contactPerson || '',
+      appliedDate: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+
+    jobs.push(newJob);
+    
+    await kv.set(JOBS_KEY, jobs);
+    await kv.set(NEXT_ID_KEY, nextId + 1);
+    
+    res.status(201).json(newJob);
+  } catch (error) {
+    console.error('Error creating job:', error);
+    res.status(500).json({ error: 'Failed to create job' });
   }
-
-  const db = readDb();
-  const newJob = {
-    id: db.nextId++,
-    company,
-    position,
-    source: source || '',
-    resumeUsed: resumeUsed || '',
-    notes: notes || '',
-    status: status || 'applied',
-    url: url || '',
-    salary: salary || '',
-    location: location || '',
-    contactPerson: contactPerson || '',
-    appliedDate: new Date().toISOString(),
-    updatedAt: new Date().toISOString()
-  };
-
-  db.jobs.push(newJob);
-  writeDb(db);
-  res.status(201).json(newJob);
 });
 
 // PUT update job
-app.put('/api/jobs/:id', (req, res) => {
-  const id = parseInt(req.params.id);
-  const db = readDb();
-  const index = db.jobs.findIndex(j => j.id === id);
+app.put('/api/jobs/:id', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    const jobs = await getJobs();
+    const index = jobs.findIndex(j => j.id === id);
 
-  if (index === -1) return res.status(404).json({ error: 'Job not found' });
+    if (index === -1) return res.status(404).json({ error: 'Job not found' });
 
-  const { company, position, source, resumeUsed, notes, status, url, salary, location, contactPerson } = req.body;
+    const { company, position, source, resumeUsed, notes, status, url, salary, location, contactPerson } = req.body;
 
-  const updatedJob = {
-    ...db.jobs[index],
-    company, position, source, resumeUsed, notes, status, url, salary, location, contactPerson,
-    updatedAt: new Date().toISOString()
-  };
+    const updatedJob = {
+      ...jobs[index],
+      company, position, source, resumeUsed, notes, status, url, salary, location, contactPerson,
+      updatedAt: new Date().toISOString()
+    };
 
-  db.jobs[index] = updatedJob;
-  writeDb(db);
-  res.json(updatedJob);
+    jobs[index] = updatedJob;
+    await kv.set(JOBS_KEY, jobs);
+    
+    res.json(updatedJob);
+  } catch (error) {
+    console.error('Error updating job:', error);
+    res.status(500).json({ error: 'Failed to update job' });
+  }
 });
 
 // PATCH update job status
-app.patch('/api/jobs/:id/status', (req, res) => {
-  const id = parseInt(req.params.id);
-  const { status } = req.body;
-  const validStatuses = ['applied', 'inProgress', 'interview', 'offer', 'done', 'rejected'];
+app.patch('/api/jobs/:id/status', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    const { status } = req.body;
+    const validStatuses = ['applied', 'inProgress', 'interview', 'offer', 'done', 'rejected'];
 
-  if (!validStatuses.includes(status)) {
-    return res.status(400).json({ error: 'Invalid status' });
+    if (!validStatuses.includes(status)) {
+      return res.status(400).json({ error: 'Invalid status' });
+    }
+
+    const jobs = await getJobs();
+    const index = jobs.findIndex(j => j.id === id);
+    
+    if (index === -1) return res.status(404).json({ error: 'Job not found' });
+
+    jobs[index].status = status;
+    jobs[index].updatedAt = new Date().toISOString();
+    
+    await kv.set(JOBS_KEY, jobs);
+    
+    res.json(jobs[index]);
+  } catch (error) {
+    console.error('Error updating job status:', error);
+    res.status(500).json({ error: 'Failed to update job status' });
   }
-
-  const db = readDb();
-  const index = db.jobs.findIndex(j => j.id === id);
-  if (index === -1) return res.status(404).json({ error: 'Job not found' });
-
-  db.jobs[index].status = status;
-  db.jobs[index].updatedAt = new Date().toISOString();
-  writeDb(db);
-  res.json(db.jobs[index]);
 });
 
 // DELETE job
-app.delete('/api/jobs/:id', (req, res) => {
-  const id = parseInt(req.params.id);
-  const db = readDb();
-  const initialLength = db.jobs.length;
-  db.jobs = db.jobs.filter(j => j.id !== id);
+app.delete('/api/jobs/:id', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    const jobs = await getJobs();
+    const initialLength = jobs.length;
+    
+    const filteredJobs = jobs.filter(j => j.id !== id);
 
-  if (db.jobs.length === initialLength) return res.status(404).json({ error: 'Job not found' });
+    if (filteredJobs.length === initialLength) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
 
-  writeDb(db);
-  res.json({ message: 'Job deleted successfully' });
+    await kv.set(JOBS_KEY, filteredJobs);
+    
+    res.json({ message: 'Job deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting job:', error);
+    res.status(500).json({ error: 'Failed to delete job' });
+  }
 });
 
 // GET stats
-app.get('/api/stats', (req, res) => {
-  const db = readDb();
-  const total = db.jobs.length;
-  const byStatus = {};
+app.get('/api/stats', async (req, res) => {
+  try {
+    const jobs = await getJobs();
+    const total = jobs.length;
+    const byStatus = {};
 
-  db.jobs.forEach(job => {
-    byStatus[job.status] = (byStatus[job.status] || 0) + 1;
-  });
+    jobs.forEach(job => {
+      byStatus[job.status] = (byStatus[job.status] || 0) + 1;
+    });
 
-  res.json({ total, byStatus });
+    res.json({ total, byStatus });
+  } catch (error) {
+    console.error('Error fetching stats:', error);
+    res.status(500).json({ error: 'Failed to fetch stats' });
+  }
 });
 
 // Vercel serverless handler
